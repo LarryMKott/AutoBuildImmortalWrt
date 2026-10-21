@@ -250,21 +250,61 @@ jobs:
       - name: Rename .img.gz file
         id: rename
         run: |
-          FILE=$(ls ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz | head -n1)
-          echo "Image file is: $FILE"
+          set -euo pipefail
+          shopt -s nullglob
+          FILES=(${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz)
+          shopt -u nullglob
+          if [ "${#FILES[@]}" -ne 1 ]; then
+            echo "❌ 打包产物数量异常：期望 1 个 .img.gz，实际 ${#FILES[@]} 个"
+            printf '   %s\n' "${FILES[@]}"
+            exit 1
+          fi
+          FILE="${FILES[0]}"
           FILENAME=$(basename "$FILE")
-          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
-          KERNEL_VERSION=$(echo "$FILENAME" | grep -oP 'k\d+\.\d+\.\d+')
-          LUCI_VERSION="${{ github.event.inputs.luci_version }}"
-          mv "$FILE" "${{ env.PACKAGED_OUTPUTPATH }}/immortalwrt-$LUCI_VERSION-phicomm-n1-btrfs-$KERNEL_VERSION.img.gz"
+          echo "Image file is: $FILENAME"
+
+          KERNEL_VERSION=$(echo "$FILENAME" | grep -oP 'k\d+\.\d+\.\d+' | head -n1 || true)
+          if ! [[ "$KERNEL_VERSION" =~ ^k[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ 无法从原始产物名解析内核版本：$FILENAME"
+            exit 1
+          fi
+
+          NAMED_LUCI_VERSION="${{ github.event.inputs.luci_version }}"
+          if ! [[ "$NAMED_LUCI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ 用于命名的 LuCI 版本非法：'$NAMED_LUCI_VERSION'"
+            exit 1
+          fi
+
+          ARTIFACT_NAME="immortalwrt-$NAMED_LUCI_VERSION-phicomm-n1-btrfs-$KERNEL_VERSION.img.gz"
+          if ! [[ "$ARTIFACT_NAME" =~ ^immortalwrt-[0-9]+\.[0-9]+\.[0-9]+-phicomm-n1-btrfs-k[0-9]+\.[0-9]+\.[0-9]+\.img\.gz$ ]]; then
+            echo "❌ 产物名不符合规范：$ARTIFACT_NAME"
+            exit 1
+          fi
+
+          mv "$FILE" "${{ env.PACKAGED_OUTPUTPATH }}/$ARTIFACT_NAME"
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          echo "NAMED_LUCI_VERSION=$NAMED_LUCI_VERSION" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+          echo "artifact=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+          echo "✅ 命名合规：$ARTIFACT_NAME"
+
+      - name: 生成 release 说明（含本次构建版本行）
+        run: |
+          {
+            echo "### 本次构建：LuCI ${NAMED_LUCI_VERSION} · 内核 ${KERNEL_VERSION#k}"
+            echo
+            echo "产物：\`${ARTIFACT_NAME}\`"
+            echo
+            cat n1/info.md
+          } > n1/info-release.md
 
       - name: Upload firmware to GitHub Releases
         uses: softprops/action-gh-release@v3
         with:
           tag_name: phicomm-n1
           name: ImmortalWrt for Phicomm N1
-          body_path: ${{ github.workspace }}/n1/info.md
+          body_path: ${{ github.workspace }}/n1/info-release.md
           files: |
-            ${{ env.PACKAGED_OUTPUTPATH }}/*.img.gz
+            ${{ env.PACKAGED_OUTPUTPATH }}/${{ steps.rename.outputs.artifact }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
